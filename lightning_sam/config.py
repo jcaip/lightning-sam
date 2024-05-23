@@ -22,6 +22,7 @@ config = {
             "prompt_encoder": True,
             "mask_decoder": False,
         },
+        "sparse": True
     },
     "dataset": {
         "train": {

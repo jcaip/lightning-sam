@@ -1,3 +1,16 @@
+# CHANGES FROM FORK
+
+The training rate scheduler was messed up, so I fixed that bug.
+I also switched to using segment-anything-fast, if you run into issues you can try switching back to the original segment-anything
+
+To schedule a training run you can use: 
+
+```
+python train.py
+```
+
+For making changes, you should update the setup function in `model.py`
+
 # Lightning Segment-Anything Model
 
 This library allows you to fine-tune the powerful Segment-Anything model from MetaAI for your custom COCO-format datasets. The library is built on top of Lightning AI's Fabric framework, providing an efficient and easy-to-use implementation for achieving state-of-the-art instance segmentation results.

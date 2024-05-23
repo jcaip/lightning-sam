@@ -16,8 +16,72 @@ from model import Model
 from torch.utils.data import DataLoader
 from utils import AverageMeter
 from utils import calc_iou
+from tqdm import tqdm
 
-torch.set_float32_matmul_precision('high')
+torch.set_float32_matmul_precision('medium')
+
+import torch
+import pandas as pd
+
+def create_result_entry(anns, gt_masks_list, masks, scores, img_idx):
+    argmax_scores = torch.argmax(scores, dim=1)
+    inference_masks = masks.gather(1, argmax_scores.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).expand(
+        (masks.size(0), 1, masks.size(2), masks.size(3)))).squeeze(1)
+
+    def _iou(mask1, mask2):
+        assert mask1.dim() == 3
+        assert mask2.dim() == 3
+        intersection = torch.logical_and(mask1, mask2)
+        union = torch.logical_or(mask1, mask2)
+        return (intersection.sum(dim=(-1, -2)) / union.sum(dim=(-1, -2)))
+
+    top_score_ious = _iou(inference_masks, gt_masks_list)
+
+    entry = []
+    for idx in range(top_score_ious.size(0)):
+        entry.append(
+            [img_idx, anns[idx]['id'], anns[idx]['category_id'], top_score_ious[idx]])
+    return entry
+
+
+def calculate_miou(results, mask_debug_out_dir, silent, cat_id_to_cat):
+    df = pd.DataFrame(results, columns=['img_id', 'ann_id', 'cat_id', 'iou'])
+    df.to_csv(f'{mask_debug_out_dir}/df.csv')
+    df['supercategory'] = df['cat_id'].map(
+        lambda cat_id: cat_id_to_cat[cat_id]['supercategory'])
+    df['category'] = df['cat_id'].map(
+        lambda cat_id: cat_id_to_cat[cat_id]['name'])
+
+    # TODO: cross reference the specifics of how we calculate mIoU with
+    # the SAM folks (should it be per dataset, per category, per image, etc)
+    # currently, just calculate them all
+
+    # TODO: QOL save the summaries to file
+
+    # per category
+    per_category = pd.pivot_table(
+        df, values='iou', index=['cat_id', 'supercategory', 'category'],
+        aggfunc=('mean', 'count'))
+    if not silent:
+        print('\nmIoU averaged per category')
+        print(per_category)
+
+    # per super-category
+    per_supercategory = pd.pivot_table(
+        df, values='iou', index=['supercategory'],
+        aggfunc=('mean', 'count'))
+    if not silent:
+        print('\nmIoU averaged per supercategory')
+        print(per_supercategory)
+
+    # per all selected masks
+    per_all_masks_agg = df['iou'].agg(['mean', 'count'])
+    if not silent:
+        print('\nmIoU averaged per all selected masks')
+        print(per_all_masks_agg)
+
+    return df['iou'].agg(['mean', 'count'])['mean']
+
 
 
 def validate(fabric: L.Fabric, model: Model, val_dataloader: DataLoader, epoch: int = 0):
@@ -26,6 +90,7 @@ def validate(fabric: L.Fabric, model: Model, val_dataloader: DataLoader, epoch: 
     f1_scores = AverageMeter()
 
     with torch.no_grad():
+        val_dataloader = tqdm(val_dataloader)
         for iter, data in enumerate(val_dataloader):
             images, bboxes, gt_masks = data
             num_images = images.size(0)
@@ -41,7 +106,7 @@ def validate(fabric: L.Fabric, model: Model, val_dataloader: DataLoader, epoch: 
                 batch_f1 = smp.metrics.f1_score(*batch_stats, reduction="micro-imagewise")
                 ious.update(batch_iou, num_images)
                 f1_scores.update(batch_f1, num_images)
-            fabric.print(
+            val_dataloader.set_description(
                 f'Val: [{epoch}] - [{iter}/{len(val_dataloader)}]: Mean IoU: [{ious.avg:.4f}] -- Mean F1: [{f1_scores.avg:.4f}]'
             )
 
@@ -69,21 +134,19 @@ def train_sam(
     dice_loss = DiceLoss()
 
     for epoch in range(1, cfg.num_epochs):
-        batch_time = AverageMeter()
-        data_time = AverageMeter()
         focal_losses = AverageMeter()
         dice_losses = AverageMeter()
         iou_losses = AverageMeter()
         total_losses = AverageMeter()
-        end = time.time()
         validated = False
+
+        train_dataloader = tqdm(train_dataloader)
 
         for iter, data in enumerate(train_dataloader):
             if epoch > 1 and epoch % cfg.eval_interval == 0 and not validated:
                 validate(fabric, model, val_dataloader, epoch)
                 validated = True
 
-            data_time.update(time.time() - end)
             images, bboxes, gt_masks = data
             batch_size = images.size(0)
             pred_masks, iou_predictions = model(images, bboxes)
@@ -102,17 +165,13 @@ def train_sam(
             fabric.backward(loss_total)
             optimizer.step()
             scheduler.step()
-            batch_time.update(time.time() - end)
-            end = time.time()
 
             focal_losses.update(loss_focal.item(), batch_size)
             dice_losses.update(loss_dice.item(), batch_size)
             iou_losses.update(loss_iou.item(), batch_size)
             total_losses.update(loss_total.item(), batch_size)
 
-            fabric.print(f'Epoch: [{epoch}][{iter+1}/{len(train_dataloader)}]'
-                         f' | Time [{batch_time.val:.3f}s ({batch_time.avg:.3f}s)]'
-                         f' | Data [{data_time.val:.3f}s ({data_time.avg:.3f}s)]'
+            train_dataloader.set_description(f'Epoch: [{epoch}][{iter+1}/{len(train_dataloader)}]'
                          f' | Focal Loss [{focal_losses.val:.4f} ({focal_losses.avg:.4f})]'
                          f' | Dice Loss [{dice_losses.val:.4f} ({dice_losses.avg:.4f})]'
                          f' | IoU Loss [{iou_losses.val:.4f} ({iou_losses.avg:.4f})]'
@@ -123,23 +182,24 @@ def configure_opt(cfg: Box, model: Model):
 
     def lr_lambda(step):
         if step < cfg.opt.warmup_steps:
-            return step / cfg.opt.warmup_steps
+            return step / cfg.opt.warmup_steps * cfg.opt.learning_rate
         elif step < cfg.opt.steps[0]:
-            return 1.0
+            return cfg.opt.learning_rate
         elif step < cfg.opt.steps[1]:
-            return 1 / cfg.opt.decay_factor
+            return cfg.opt.learning_rate / cfg.opt.decay_factor
         else:
-            return 1 / (cfg.opt.decay_factor**2)
+            return cfg.opt.learning_rate / (cfg.opt.decay_factor**2)
 
-    optimizer = torch.optim.Adam(model.model.parameters(), lr=cfg.opt.learning_rate, weight_decay=cfg.opt.weight_decay)
+    optimizer = torch.optim.AdamW(model.model.parameters(), lr=cfg.opt.learning_rate)
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
     return optimizer, scheduler
 
 
 def main(cfg: Box) -> None:
-    fabric = L.Fabric(accelerator="auto",
-                      devices=cfg.num_devices,
+    fabric = L.Fabric(accelerator="cuda",
+                      precision="bf16-true",
+                      devices=1,
                       strategy="auto",
                       loggers=[TensorBoardLogger(cfg.out_dir, name="lightning-sam")])
     fabric.launch()
@@ -148,9 +208,11 @@ def main(cfg: Box) -> None:
     if fabric.global_rank == 0:
         os.makedirs(cfg.out_dir, exist_ok=True)
 
-    with fabric.device:
-        model = Model(cfg)
-        model.setup()
+    model = Model(cfg)
+    model.setup()
+
+    if fabric.global_rank == 0:
+        print(model)
 
     train_data, val_data = load_datasets(cfg, model.model.image_encoder.img_size)
     train_data = fabric._setup_dataloader(train_data)
@@ -158,7 +220,7 @@ def main(cfg: Box) -> None:
 
     optimizer, scheduler = configure_opt(cfg, model)
     model, optimizer = fabric.setup(model, optimizer)
-
+    # validate(fabric, model, val_data, epoch=0)
     train_sam(cfg, fabric, model, optimizer, scheduler, train_data, val_data)
     validate(fabric, model, val_data, epoch=0)
 

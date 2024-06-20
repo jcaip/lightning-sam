@@ -138,7 +138,7 @@ def configure_opt(cfg: Box, model: Model):
 def main(cfg: Box) -> None:
     fabric = L.Fabric(accelerator="cuda",
                       precision="bf16-true",
-                      devices=1,
+                      devices=cfg.num_devices,
                       strategy="auto",
                       loggers=[TensorBoardLogger(cfg.out_dir, name="lightning-sam")])
     fabric.launch()

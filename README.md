@@ -1,15 +1,20 @@
 # CHANGES FROM FORK
 
 The training rate scheduler was messed up, so I fixed that bug.
-I also switched to using segment-anything-fast, if you run into issues you can try switching back to the original segment-anything
+I also switched to using segment-anything-fast, if you run into issues you can try switching back to the original segment-anything. Please note that segment-anything-fast throws a warning when using the fast flash 4 attention kernels, I did my testing with them disabled
 
-To schedule a training run you can use: 
+
+
+To schedule a training run you can use:
 
 ```
+export SEGMENT_ANYTHING_FAST_USE_FLASH_4=0
 python train.py
 ```
 
-For making changes, you should update the setup function in `model.py`
+For making changes, you should update the setup function in `model.py` and `config.py`
+
+For `accelerated` sparse training, we have a dependency on [torchao](https://github.com/pytorch/ao?tab=readme-ov-file#installation)
 
 # Lightning Segment-Anything Model
 

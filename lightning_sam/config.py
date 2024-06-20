@@ -1,10 +1,10 @@
 from box import Box
 
 config = {
-    "num_devices": 4,
+    "num_devices": 1,
     "batch_size": 4,
     "num_workers": 4,
-    "num_epochs": 14,
+    "num_epochs": 2,
     "eval_interval": 1,
     "out_dir": "out/training",
     "opt": {
@@ -22,7 +22,11 @@ config = {
             "prompt_encoder": True,
             "mask_decoder": False,
         },
-        "sparse": True
+        "sparse": {
+            "enable": True, 
+            # either 'simulated' for torch.ao.pruning masking flow (2:4), or 'accelerated' for torchao fast sparse training (2:4 both ways)
+            "type": "simulated", 
+        },
     },
     "dataset": {
         "train": {
